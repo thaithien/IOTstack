@@ -1,280 +1,436 @@
 #!/bin/bash
 
-#whiptail guide https://saveriomiroddi.github.io/Shell-scripting-adventures-part-3/
+CURRENT_BRANCH=$(git name-rev --name-only HEAD)
 
-#future function add password in build phase
-password_dialog() {
-    while [[ "$passphrase" != "$passphrase_repeat" || ${#passphrase} -lt 8 ]]; do
+# Minimum Software Versions
+REQ_DOCKER_VERSION=18.2.0
+REQ_PYTHON_VERSION=3.6.9
+REQ_PIP_VERSION=3.6.9
+REQ_PYAML_VERSION=0.16.12
+REQ_BLESSED_VERSION=1.17.5
 
-            passphrase=$(whiptail --passwordbox "${passphrase_invalid_message}Please enter the passphrase (8 chars min.):" 20 78 3>&1 1>&2 2>&3)
-            passphrase_repeat=$(whiptail --passwordbox "Please repeat the passphrase:" 20 78 3>&1 1>&2 2>&3)
+PYTHON_CMD=python3
+VGET_CMD="$PYTHON_CMD ./scripts/python_deps_check.py"
 
-            passphrase_invalid_message="Passphrase too short, or not matching! "
-    done
-    echo  $passphrase
-}
-#test=$( password_dialog )
+sys_arch=$(uname -m)
 
+# ----------------------------------------------
+# Helper functions
+# ----------------------------------------------
 function command_exists() {
 	command -v "$@" > /dev/null 2>&1
 }
 
-#function copies the template yml file to the local service folder and appends to the docker-compose.yml file
-function yml_builder(){
-    service="services/$1/service.yml"
+function user_in_group()
+{
+    # see if the group exists
+    grep -q "^$1:" /etc/group;
 
-    [ -d ./services/ ] || mkdir ./services/
-    [ -d ./services/$1 ] || mkdir ./services/$1
+    # sense that the group does not exist
+    if [ $? -ne 0 ]; then return 0; fi
 
-    cp -n -RT .templates/$1/ ./services/$1/
-
-    cat $service >> docker-compose.yml
-
-    #rm $service
-
+    # group exists - now check that the user is a member
+    groups | grep -q "\b$1\b"
 }
 
-# build Dockerfile for nodered
-build_nodered() {
-node_selection=$(whiptail --title "Node-RED nodes" --checklist --separate-output\
-    "Use the [SPACEBAR] to select the nodes you want preinstalled" 20 78 12 -- \
-    "node-red-node-pi-gpiod" " " "ON" \
-    "node-red-dashboard" " " "ON" \
-    "node-red-node-openweathermap" " " "OFF" \
-    "node-red-node-google" " " "OFF" \
-    "node-red-node-emoncms" " " "OFF" \
-    "node-red-node-geofence" " " "OFF" \
-    "node-red-node-ping" " " "OFF" \
-    "node-red-node-random" " " "OFF" \
-    "node-red-node-smooth" " " "OFF" \
-    "node-red-node-darksky" " " "OFF" \
-    "node-red-node-sqlite" " " "OFF" \
-    "node-red-contrib-influxdb" " " "ON" \
-    "node-red-contrib-config" " " "OFF" \
-    "node-red-contrib-grove" " " "OFF" \
-    "node-red-contrib-diode" " " "OFF" \
-    "node-red-contrib-bigtimer" " " "OFF" \
-    "node-red-contrib-esplogin" " " "OFF" \
-    "node-red-contrib-timeout" " " "OFF" \
-    "node-red-contrib-moment" " " "OFF" \
-    "node-red-contrib-particle" " " "OFF" \
-    "node-red-contrib-web-worldmap" " " "OFF" \
-    "node-red-contrib-ramp-thermostat" " " "OFF" \
-    "node-red-contrib-isonline" " " "OFF" \
-    "node-red-contrib-npm" " " "OFF" \
-    "node-red-contrib-file-function" " " "OFF" \
-    "node-red-contrib-boolean-logic" " " "OFF" \
-    "node-red-contrib-home-assistant-websocket" " " "OFF" \
-    "node-red-contrib-blynk-ws" " " "OFF" \
-    "node-red-contrib-owntracks" " " "OFF" \
-    "node-red-contrib-alexa-local" " " "OFF" \
-    "node-red-contrib-heater-controller" " " "OFF" \
-    3>&1 1>&2 2>&3)
+function minimum_version_check() {
+	# Usage: minimum_version_check required_version current_major current_minor current_build
+	# Example: minimum_version_check "1.2.3" 1 2 3
+	REQ_MIN_VERSION_MAJOR=$(echo "$1"| cut -d' ' -f 2 | cut -d'.' -f 1)
+	REQ_MIN_VERSION_MINOR=$(echo "$1"| cut -d' ' -f 2 | cut -d'.' -f 2)
+	REQ_MIN_VERSION_BUILD=$(echo "$1"| cut -d' ' -f 2 | cut -d'.' -f 3)
 
-    ##echo "$check_selection"
-    mapfile -t checked_nodes <<< "$node_selection"
+	CURR_VERSION_MAJOR=$2
+	CURR_VERSION_MINOR=$3
+	CURR_VERSION_BUILD=$4
+	
+	VERSION_GOOD="Unknown"
 
-    nr_dfile=./services/nodered/Dockerfile
+	NUMB_REG='^[0-9]+$'
+	if ! [[ $CURR_VERSION_MAJOR =~ $NUMB_REG ]] ; then
+		echo "$VERSION_GOOD"
+		return 1
+	fi
+	if ! [[ $CURR_VERSION_MINOR =~ $NUMB_REG ]] ; then
+		echo "$VERSION_GOOD"
+		return 1
+	fi
+	if ! [[ $CURR_VERSION_BUILD =~ $NUMB_REG ]] ; then
+		echo "$VERSION_GOOD"
+		return 1
+	fi
 
-    sqliteflag=0
+	if [ -z "$CURR_VERSION_MAJOR" ]; then
+		echo "$VERSION_GOOD"
+		return 1
+	fi
 
-    touch $nr_dfile
-    echo "FROM nodered/node-red:latest" > $nr_dfile
-    #node red install script inspired from https://tech.scargill.net/the-script/
-    echo "RUN for addonnodes in \\" >> $nr_dfile
-    for checked in "${checked_nodes[@]}"; do
-        #test to see if sqlite is selected and set flag, sqlite require additional flags
-        if [ "$checked" = "node-red-node-sqlite" ];
-        then
-            sqliteflag=1
-        else
-            echo "$checked \\"  >> $nr_dfile
-        fi
-    done
-    echo "; do \\"  >> $nr_dfile
-    echo "npm install \${addonnodes} ;\\"  >> $nr_dfile
-    echo "done;" >> $nr_dfile
+	if [ -z "$CURR_VERSION_MINOR" ]; then
+		echo "$VERSION_GOOD"
+		return 1
+	fi
 
-    [ $sqliteflag = 1 ] && echo "RUN npm install --unsafe-perm node-red-node-sqlite" >> $nr_dfile
+	if [ -z "$CURR_VERSION_BUILD" ]; then
+		echo "$VERSION_GOOD"
+		return 1
+	fi
+
+	if [ "${CURR_VERSION_MAJOR}" -ge $REQ_MIN_VERSION_MAJOR ]; then
+		VERSION_GOOD="true"
+		echo "$VERSION_GOOD"
+		return 0
+	else
+		VERSION_GOOD="false"
+	fi
+
+	if [ "${CURR_VERSION_MAJOR}" -ge $REQ_MIN_VERSION_MAJOR ] && \
+		[ "${CURR_VERSION_MINOR}" -ge $REQ_MIN_VERSION_MINOR ]; then
+		VERSION_GOOD="true"
+		echo "$VERSION_GOOD"
+		return 0
+	else
+		VERSION_GOOD="false"
+	fi
+
+	if [ "${CURR_VERSION_MAJOR}" -ge $REQ_MIN_VERSION_MAJOR ] && \
+		[ "${CURR_VERSION_MINOR}" -ge $REQ_MIN_VERSION_MINOR ] && \
+		[ "${CURR_VERSION_BUILD}" -ge $REQ_MIN_VERSION_BUILD ]; then
+		VERSION_GOOD="true"
+		echo "$VERSION_GOOD"
+		return 0
+	else
+		VERSION_GOOD="false"
+	fi
+
+	echo "$VERSION_GOOD"
 }
 
-#---------------------------------------------------------------------------------------------------
-# Menu system starts here
-#display main menu
-mainmenu_selection=$(whiptail --title "Main Menu" --menu --notags \
-    "" 20 78 12 -- \
-    "install" "Install Docker" \
-    "build" "Build Stack" \
-    "commands" "Docker commands" \
-    "misc" "Miscellaneous commands" \
-    3>&1 1>&2 2>&3)
+function user_in_group()
+{
+	if grep -q $1 /etc/group ; then
+		if id -nGz "$USER" | grep -qzxF "$1";	then
+				echo "true"
+		else
+				echo "false"
+		fi
+	else
+		echo "notgroup"
+	fi
+}
 
-case $mainmenu_selection in
-    #MAINMENU Install docker  ------------------------------------------------------------	
-    "install")
-        #sudo apt update && sudo apt upgrade -y ;;
+function check_git_updates()
+{
+	UPSTREAM=${1:-'@{u}'}
+	LOCAL=$(git rev-parse @)
+	REMOTE=$(git rev-parse "$UPSTREAM")
+	BASE=$(git merge-base @ "$UPSTREAM")
 
-        if  command_exists docker; then
-            echo "docker already installed"
-        else
-        echo "Install Docker"
-            curl -fsSL https://get.docker.com | sh
-            sudo usermod -aG docker $USER
-        fi
+	if [ $LOCAL = $REMOTE ]; then
+			echo "Up-to-date"
+	elif [ $LOCAL = $BASE ]; then
+			echo "Need to pull"
+	elif [ $REMOTE = $BASE ]; then
+			echo "Need to push"
+	else
+			echo "Diverged"
+	fi
+}
+function install_python3_and_deps() {
+	CURR_PYTHON_VER="${1:-Unknown}"
+	CURR_PYAML_VER="${2:-Unknown}"
+	if (whiptail --title "Python 3 and Dependencies" --yesno "Python 3.6.9 or later (Current = $CURR_PYTHON_VER), ruamel.yaml 0.16.12 or later (Current = $CURR_PYAML_VER), blessed and pip3 are required for IOTstack to function correctly. Install these now?" 20 78); then
+		sudo apt update
+		sudo apt install -y python3-pip python3-dev
+		if [ $? -eq 0 ]; then
+			PYTHON_VERSION_GOOD="true"
+		else
+			echo "Failed to install Python" >&2
+			exit 1
+		fi
+		pip3 install -U ruamel.yaml==0.16.12 blessed
+		if [ $? -eq 0 ]; then
+			PYAML_VERSION_GOOD="true"
+			BLESSED_GOOD="true"
+		else
+			echo "Failed to install ruamel.yaml and Blessed" >&2
+			exit 1
+		fi
+	fi
+}
 
-        if command_exists docker-compose; then
-            echo "docker-compose already installed"
-        else
-            echo "Install docker-compose"
-            sudo apt install -y docker-compose
-        fi
+function install_docker() {
+	sudo bash ./scripts/install_docker.sh install
+}
 
-        if ( whiptail --title "Restart Required" --yesno "It is recommended that you restart you device now. Select yes to do so now" 20 78); then
-            sudo reboot
-        fi
-        ;;
-    #MAINMENU Build stack ------------------------------------------------------------	
-    "build")
-        container_selection=$(whiptail --title "Container Selection"  --notags --separate-output --checklist \
-            "Use the [SPACEBAR] to select which containers you would like to install" 20 78 12 \
-            "portainer" "Portainer" "ON" \
-            "nodered" "Node-RED" "ON" \
-            "influxdb" "InfluxDB" "ON" \
-            "grafana" "Grafana" "ON" \
-            "mosquitto" "Eclipse-Mosquitto" "ON" \
-            "postgres" "Postgres" "OFF" \
-            "adminer" "Adminer" "OFF" \
-            "openhab" "openHAB" "OFF" \
-            "hassio" "Home Assistant (Hass.io)" "OFF" \
-            3>&1 1>&2 2>&3)
+function update_docker() {
+	sudo bash ./scripts/install_docker.sh upgrade
+}
 
-        mapfile -t containers <<< "$container_selection"
+function update_project() {
+	git pull origin $CURRENT_BRANCH
+	git status
+}
 
-        #if no container is selected then dont overwrite the docker-compose.yml file
-        if [ -n "$container_selection" ];
-        then
-            touch docker-compose.yml
-            echo "version: '2'" > docker-compose.yml
-            echo "services:" >> docker-compose.yml
+function do_python3_checks() {
+	PYTHON_VERSION_GOOD="false"
+	PYAML_VERSION_GOOD="false"
+	BLESSED_GOOD="false"
 
-            for container in "${containers[@]}"; do
+	if command_exists $PYTHON_CMD && command_exists pip3; then
+		PYTHON_VERSION=$($PYTHON_CMD --version 2>/dev/null)
+		PYTHON_VERSION_MAJOR=$(echo "$PYTHON_VERSION"| cut -d' ' -f 2 | cut -d' ' -f 2 | cut -d'.' -f 1)
+		PYTHON_VERSION_MINOR=$(echo "$PYTHON_VERSION"| cut -d' ' -f 2 | cut -d'.' -f 2)
+		PYTHON_VERSION_BUILD=$(echo "$PYTHON_VERSION"| cut -d' ' -f 2 | cut -d'.' -f 3)
 
-                case $container in
+		PYAML_VERSION=$($VGET_CMD --pyaml-version 2>/dev/null)
+		PYAML_VERSION="${PYAML_VERSION:-Unknown}"
+		PYAML_VERSION_MAJOR=$(echo "$PYAML_VERSION"| cut -d' ' -f 2 | cut -d'.' -f 1)
+		PYAML_VERSION_MINOR=$(echo "$PYAML_VERSION"| cut -d' ' -f 2 | cut -d'.' -f 2)
+		PYAML_VERSION_BUILD=$(echo "$PYAML_VERSION"| cut -d' ' -f 2 |cut -d'.' -f 3)
 
-                "portainer")
-                    echo "Adding portainer container"
-                    yml_builder "portainer"
-                    ;;
-                "nodered")
-                    echo "Adding Node-RED container"
-                    yml_builder "nodered"
-                    build_nodered
-                    ;;
-                "influxdb")
-                    echo "Adding influxdb container"
-                    yml_builder "influxdb"
-                    ;;
-                "grafana")
-                    echo "Adding Grafana"
-                    yml_builder "grafana"
-                    ;;
-                "mosquitto")
-                    echo "Adding Mosquitto"
-                    yml_builder "mosquitto"
-                    ;;
-                "postgres")
-                    echo "Adding Postgres Container"
-                    yml_builder "postgres"
-                    ;;
-                "adminer")
-                    echo "Adding Adminer container"
-                    yml_builder "adminer"
-                    ;;
-                "openhab")
-                    echo "Adding openHAB container"
-                    yml_builder "openhab"
-                    ;;
-                "hassio")
-                    echo "Adding Home Asstant Container"
-                    yml_builder "hassio"
-                    ;;
-                *)
-                    echo "Failed to add $container container"
-                    ;;
-                esac
-            done
+		BLESSED_VERSION=$($VGET_CMD --blessed-version 2>/dev/null)
+		BLESSED_VERSION="${BLESSED_VERSION:-Unknown}"
+		BLESSED_VERSION_MAJOR=$(echo "$BLESSED_VERSION"| cut -d' ' -f 2 | cut -d'.' -f 1)
+		BLESSED_VERSION_MINOR=$(echo "$BLESSED_VERSION"| cut -d' ' -f 2 | cut -d'.' -f 2)
+		BLESSED_VERSION_BUILD=$(echo "$BLESSED_VERSION"| cut -d' ' -f 2 | cut -d'.' -f 3)
 
-            echo "docker-compose successfully created"
-            echo "run \'docker-compose up -d\' to start the stack"
-        else
-            echo "Build cancelled"
+		printf "Python Version: '${PYTHON_VERSION:-Unknown}'. "
+		if [ "$(minimum_version_check $REQ_PYTHON_VERSION $PYTHON_VERSION_MAJOR $PYTHON_VERSION_MINOR $PYTHON_VERSION_BUILD)" == "true" ]; then
+			PYTHON_VERSION_GOOD="true"
+			echo "Python is up to date." >&2
+		else
+			echo "Python is outdated." >&2
+			install_python3_and_deps "$PYTHON_VERSION_MAJOR.$PYTHON_VERSION_MINOR.$PYTHON_VERSION_BUILD" "$PYAML_VERSION_MAJOR.$PYAML_VERSION_MINOR.$PYAML_VERSION_BUILD"
+			return 1
+		fi
+		printf "ruamel.yaml Version: '$PYAML_VERSION'. "
+		if [ "$(minimum_version_check $REQ_PYAML_VERSION $PYAML_VERSION_MAJOR $PYAML_VERSION_MINOR $PYAML_VERSION_BUILD)" == "true" ]; then
+			PYAML_VERSION_GOOD="true"
+			echo "ruamel.yaml is up to date." >&2
+		else
+			echo "ruamel.yaml is outdated." >&2
+			if [ "$PYAML_VERSION" != "Unknown" ]; then
+				install_python3_and_deps "$PYTHON_VERSION_MAJOR.$PYTHON_VERSION_MINOR.$PYTHON_VERSION_BUILD" "$PYAML_VERSION_MAJOR.$PYAML_VERSION_MINOR.$PYAML_VERSION_BUILD"
+			else
+				install_python3_and_deps "$PYTHON_VERSION_MAJOR.$PYTHON_VERSION_MINOR.$PYTHON_VERSION_BUILD"
+			fi
+			return 1
+		fi
+		printf "Blessed Version: '$BLESSED_VERSION'. "
+		if [ "$(minimum_version_check $REQ_BLESSED_VERSION $BLESSED_VERSION_MAJOR $BLESSED_VERSION_MINOR $BLESSED_VERSION_BUILD)" == "true" ]; then
+			BLESSED_GOOD="true"
+			echo "Blessed is up to date." >&2
+		else
+			echo "Blessed is outdated." >&2
+			if [ "$BLESSED_VERSION" != "Unknown" ]; then
+				install_python3_and_deps "$PYTHON_VERSION_MAJOR.$PYTHON_VERSION_MINOR.$PYTHON_VERSION_BUILD" "$PYAML_VERSION_MAJOR.$PYAML_VERSION_MINOR.$PYAML_VERSION_BUILD"
+			else
+				install_python3_and_deps "$PYTHON_VERSION_MAJOR.$PYTHON_VERSION_MINOR.$PYTHON_VERSION_BUILD"
+			fi
+			return 1
+		fi
+	else
+		install_python3_and_deps
+		return 1
+	fi
+}
 
-        fi
-    ;;
-    #MAINMENU Docker commands ------------------------------------------------------------	
-    "commands")
+function do_env_setup() {
+	echo "Setting up environment:"
+	if [[ ! "$(user_in_group bluetooth)" == "notgroup" ]] && [[ ! "$(user_in_group bluetooth)" == "true" ]]; then
+    echo "User is NOT in 'bluetooth' group. Adding:" >&2
+    echo "sudo usermod -G bluetooth -a $USER" >&2
+		echo "You will need to restart your system before the changes take effect."
+		sudo usermod -G "bluetooth" -a $USER
+	fi
 
-        docker_selection=$(whiptail --title "Docker commands"  --menu --notags \
-            "Shortcut to common docker commands" 20 78 12 -- \
-            "start" "Start stack" \
-            "restart" "Restart stack" \
-            "stop" "Stop stack" \
-            "stop_all" "Stop any running container regardless of stack" \
-            "pull" "Update all containers" \
-            "prune_volumes" "Delete all stopped containers and docker volumes" \
-            "prune_images" "Delete all images not associated with container" \
-             3>&1 1>&2 2>&3)
+	if [ ! "$(user_in_group docker)" == "true" ]; then
+    echo "User is NOT in 'docker' group. Adding:" >&2
+    echo "sudo usermod -G docker -a $USER" >&2
+		echo "You will need to restart your system before the changes take effect."
+		sudo usermod -G "docker" -a $USER
+	fi
+}
 
-        case $docker_selection in
-        "start") ./scripts/start.sh ;;
-        "stop") ./scripts/stop.sh ;;
-        "stop_all") ./scripts/stop-all.sh ;;
-        "restart") ./scripts/restart.sh ;;
-        "pull") ./scripts/update.sh ;;
-        "prune_volumes") ./scripts/prune-volumes.sh ;;
-        "prune_images") ./scripts/prune-images.sh ;;
-        esac
-    ;;
-    #MAINMENU Misc commands------------------------------------------------------------	
-    "misc")
-        misc_sellection=$(whiptail --title "Miscellaneous Commands" --menu --notags \
-            "Some helpful commands" 20 78 12 -- \
-            "swap" "Disable swap" \
-            "dropbox-uploader" "Dropbox-Uploader" \
-            "log2ram" "install log2ram to decrease load on sd card, moves /var/log into ram" \
-            3>&1 1>&2 2>&3)
+function do_docker_checks() {
+	if command_exists docker; then
+		DOCKER_VERSION_GOOD="false"
+		DOCKER_VERSION=$(docker version -f "{{.Server.Version}}" 2>&1)
+		echo "Command: docker version -f \"{{.Server.Version}}\""
+		if [[ "$DOCKER_VERSION" == *"Cannot connect to the Docker daemon"* ]]; then
+			echo "Error getting docker version. Error when connecting to docker daemon. Check that docker is running."
+			if (whiptail --title "Docker and Docker-Compose" --yesno "Error getting docker version. Error when connecting to docker daemon. Check that docker is running.\n\nCommand: docker version -f \"{{.Server.Version}}\"\n\nExit?" 20 78); then
+				exit 1
+			fi
+		elif [[ "$DOCKER_VERSION" == *" permission denied"* ]]; then
+			echo "Error getting docker version. Received permission denied error. Try running with: ./menu.sh --run-env-setup"
+			if (whiptail --title "Docker and Docker-Compose" --yesno "Error getting docker version. Received permission denied error.\n\nTry rerunning the menu with: ./menu.sh --run-env-setup\n\nExit?" 20 78); then
+				exit 1
+			fi
+			return 0
+		fi
+		
+		if [[ -z "$DOCKER_VERSION" ]]; then
+			echo "Error getting docker version. Error when running docker command. Check that docker is installed correctly."
+		fi
+		
+		DOCKER_VERSION_MAJOR=$(echo "$DOCKER_VERSION"| cut -d'.' -f 1)
+		DOCKER_VERSION_MINOR=$(echo "$DOCKER_VERSION"| cut -d'.' -f 2)
 
-        case $misc_sellection in
-	"swap")
-		sudo dphys-swapfile swapoff
-		sudo dphys-swapfile uninstall
-		sudo update-rc.d dphys-swapfile remove
-                echo "Swap file has been removed"
-	;;
-        "dropbox-uploader")
-            if [ ! -d ~/Dropbox-Uploader ]
-            then
-                git clone https://github.com/andreafabrizi/Dropbox-Uploader.git ~/Dropbox-Uploader
-                chmod +x ~/Dropbox-Uploader/dropbox_uploader.sh
-                pushd ~/Dropbox-Uploader && ./dropbox_uploader.sh
-		popd
-            else
-                echo "Dropbox uploader already installed"
-            fi
-        ;;
-        "log2ram")
-            if [ ! -d ~/log2ram ]
-            then
-                git clone https://github.com/azlux/log2ram.git ~/log2ram
-                chmod +x ~/log2ram/install.sh
-                pushd ~/log2ram && sudo ./install.sh
-		popd
-            else
-                echo "log2ram already installed"
-            fi
-        ;;
+		DOCKER_VERSION_BUILD=$(echo "$DOCKER_VERSION"| cut -d'.' -f 3)
+		DOCKER_VERSION_BUILD=$(echo "$DOCKER_VERSION_BUILD"| cut -f1 -d"-")
+
+		if [ "$(minimum_version_check $REQ_DOCKER_VERSION $DOCKER_VERSION_MAJOR $DOCKER_VERSION_MINOR $DOCKER_VERSION_BUILD )" == "true" ]; then
+			[ -f .docker_outofdate ] && rm .docker_outofdate
+			DOCKER_VERSION_GOOD="true"
+			echo "Docker version $DOCKER_VERSION >= $REQ_DOCKER_VERSION. Docker is good to go." >&2
+		else
+			if [ ! -f .docker_outofdate ]; then
+				if (whiptail --title "Docker and Docker-Compose Version Issue" --yesno "Docker version is currently $DOCKER_VERSION which is less than $REQ_DOCKER_VERSION consider upgrading or you may experience issues. You will not be prompted again. You can manually upgrade by typing:\n  sudo apt upgrade docker docker-compose\n\nAttempt to upgrade now?" 20 78); then
+					update_docker
+				else
+					touch .docker_outofdate
+				fi
+			fi
+		fi
+	else
+		[ -f .docker_outofdate ] && rm .docker_outofdate
+		echo "Docker not installed" >&2
+		if [ ! -f .docker_notinstalled ]; then
+			if (whiptail --title "Docker and Docker-Compose" --yesno "Docker is not currently installed, and is required to run IOTstack. Would you like to install docker and docker-compose now?\nYou will not be prompted again." 20 78); then
+					[ -f .docker_notinstalled ] && rm .docker_notinstalled
+					echo "Setting up environment:"
+					if [[ ! "$(user_in_group bluetooth)" == "notgroup" ]] && [[ ! "$(user_in_group bluetooth)" == "true" ]]; then
+						echo "User is NOT in 'bluetooth' group. Adding:" >&2
+						echo "sudo usermod -G bluetooth -a $USER" >&2
+						echo "You will need to restart your system before the changes take effect."
+						sudo usermod -G "bluetooth" -a $USER
+					fi
+
+					if [ ! "$(user_in_group docker)" == "true" ]; then
+						echo "User is NOT in 'docker' group. Adding:" >&2
+						echo "sudo usermod -G docker -a $USER" >&2
+						echo "You will need to restart your system before the changes take effect."
+						sudo usermod -G "docker" -a $USER
+					fi
+					install_docker
+				else
+					touch .docker_notinstalled
+			fi
+		fi
+	fi
+}
+
+function do_project_checks() {
+	echo "Checking for project update" >&2
+	git fetch origin $CURRENT_BRANCH
+
+	if [[ "$(check_git_updates)" == "Need to pull" ]]; then
+		echo "An update is available for IOTstack" >&2
+		if [ ! -f .project_outofdate ]; then
+			if (whiptail --title "Project update" --yesno "An update is available for IOTstack\nYou will not be reminded again until after you update.\nYou can upgrade manually by typing:\n  git pull origin $CURRENT_BRANCH \n\n\nWould you like to update now?" 14 78); then
+				update_project
+			else
+				touch .project_outofdate
+			fi
+		fi
+	else
+		[ -f .project_outofdate ] && rm .project_outofdate
+		echo "Project is up to date" >&2
+	fi
+}
+
+function do_env_checks() {
+	GROUPSGOOD=0
+
+	if [[ ! "$(user_in_group bluetooth)" == "notgroup" ]] && [[ ! "$(user_in_group bluetooth)" == "true" ]]; then
+	  GROUPSGOOD=1
+    echo "User is NOT in 'bluetooth' group" >&2
+	fi
+
+	if [[ ! "$(user_in_group docker)" == "true" ]]; then
+	  GROUPSGOOD=1
+    echo "User is NOT in 'docker' group" >&2
+	fi
+
+	if [ "$GROUPSGOOD" == 1 ]; then
+		echo "!! You might experience issues with docker or bluetooth. To fix run: ./menu.sh --run-env-setup"
+	fi
+}
+
+# ----------------------------------------------
+# Menu bootstrap entry point
+# ----------------------------------------------
+
+if [[ "$*" == *"--no-check"* ]]; then
+	echo "Skipping preflight checks."
+else
+	do_project_checks
+	do_env_checks
+	do_python3_checks
+	echo "Please enter sudo pasword if prompted"
+	do_docker_checks
+
+	if [[ "$DOCKER_VERSION_GOOD" == "true" ]] && \
+		[[ "$PYTHON_VERSION_GOOD" == "true" ]] && \
+		[[ "$PYAML_VERSION_GOOD" == "true" ]] && \
+		[[ "$BLESSED_GOOD" == "true" ]]; then
+		echo "Project dependencies up to date"
+		echo ""
+	else
+		echo "Project dependencies not up to date. Menu may crash."
+		echo "To be prompted to update again, run command:"
+		echo "  rm .docker_notinstalled || rm .docker_outofdate || rm .project_outofdate"
+		echo ""
+	fi
+fi
+
+while test $# -gt 0
+do
+	case "$1" in
+		--branch) CURRENT_BRANCH=${2:-$(git name-rev --name-only HEAD)}
+			;;
+		--no-check) echo ""
+			;;
+		--run-env-setup) # Sudo cannot be run from inside functions.
+				echo "Setting up environment:"
+				if [[ ! "$(user_in_group bluetooth)" == "notgroup" ]] && [[ ! "$(user_in_group bluetooth)" == "true" ]]; then
+					echo "User is NOT in 'bluetooth' group. Adding:" >&2
+					echo "sudo usermod -G bluetooth -a $USER" >&2
+					echo "You will need to restart your system before the changes take effect."
+					sudo usermod -G "bluetooth" -a $USER
+				fi
+
+				if [ ! "$(user_in_group docker)" == "true" ]; then
+					echo "User is NOT in 'docker' group. Adding:" >&2
+					echo "sudo usermod -G docker -a $USER" >&2
+					echo "You will need to restart your system before the changes take effect."
+					sudo usermod -G "docker" -a $USER
+				fi
+			;;
+		--encoding) ENCODING_TYPE=$2
+			;;
+		--*) echo "bad option $1"
+			;;
 	esac
-    ;;
+	shift
+done
 
-    *) ;;
-esac
+# This section is temporary, it's just for notifying people of potential breaking changes.
+if [[ -f .new_install ]]; then
+	echo "Existing installation detected."
+else
+	if [[ -f docker-compose.yml ]]; then
+		echo "Warning: Please ensure to read the following prompt"
+		sleep 1
+		if (whiptail --title "Project update" --yesno "There has been a large update to IOTstack, and there may be breaking changes to your current setup. Would you like to switch to the older branch by having the command:\ngit checkout old-menu\n\nrun for you?\n\nIt's suggested that you backup your existing IOTstack instance if you select No\n\nIf you run into problems, please open an issue: https://github.com/SensorsIot/IOTstack/issues\n\nOr Discord: https://discord.gg/ZpKHnks\n\nRelease Notes: https://github.com/SensorsIot/IOTstack/blob/master/docs/New-Menu-Release-Notes.md" 24 95); then
+			echo "Running command: git checkout old-menu"
+			git checkout old-menu
+			sleep 2
+		fi
+	fi
+	touch .new_install
+fi
+
+# Hand control to new menu
+$PYTHON_CMD ./scripts/menu_main.py $ENCODING_TYPE
